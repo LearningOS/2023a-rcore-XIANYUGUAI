@@ -41,6 +41,117 @@ impl Inode {
             .lock()
             .modify(self.block_offset, f)
     }
+    /// link name to inode id under this inode
+    pub fn link(&self, old_name: &str, new_name: &str) -> bool {
+        let mut fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            // assert it is a directory
+            assert!(root_inode.is_dir());
+            // has the file been created?
+            self.find_inode_id(old_name, root_inode)
+        };
+        if let Some(inode_id ) = self.read_disk_inode(op) {
+            let (inode_block_id, inode_block_offset) = fs.get_disk_inode_pos(inode_id);
+            get_block_cache(inode_block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(inode_block_offset, |inode: &mut DiskInode| {
+                    inode.nlink += 1;
+                });
+            self.modify_disk_inode(|root_inode| {
+                // append file in the dirent
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;
+                let new_size = (file_count + 1) * DIRENT_SZ;
+                // increase size
+                self.increase_size(new_size as u32, root_inode, &mut fs);
+                // write dirent
+                let dirent = DirEntry::new(new_name, inode_id);
+                root_inode.write_at(
+                    file_count * DIRENT_SZ,
+                    dirent.as_bytes(),
+                    &self.block_device,
+                );
+            });
+
+            block_cache_sync_all();
+            return true;
+        } 
+        return false;
+        // release efs lock automatically by compiler
+    }
+    /// unlink name under this node
+    pub fn unlink(&self, name: &str) -> bool {
+        let mut _fs = self.fs.lock();
+        let op = |root_inode: &DiskInode| {
+            // assert it is a directory
+            assert!(root_inode.is_dir());
+            // has the file been created?
+            self.find_inode_id(name, root_inode)
+        };
+        if let Some(inode_id ) = self.read_disk_inode(op) {
+            let (inode_block_id, inode_block_offset) = _fs.get_disk_inode_pos(inode_id);
+            get_block_cache(inode_block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(inode_block_offset, |inode: &mut DiskInode| {
+                    inode.nlink -= 1;
+                });
+
+            block_cache_sync_all();
+            return true;
+        } 
+        return false;
+        // release efs lock automatically by compiler
+    }
+    /// remove name from current inode
+    pub fn remove(&self, name: &str) {
+        let mut fs = self.fs.lock();
+        self.modify_disk_inode(|root_inode| {
+            // append file in the dirent
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.name() == name {
+                    // write dirent
+                    let empty = DirEntry::empty();
+                    root_inode.write_at(
+                        i * DIRENT_SZ,
+                        empty.as_bytes(),
+                        &self.block_device,
+                    );
+                    break;
+                }
+            }
+            let new_size = (file_count - 1) * DIRENT_SZ;
+            // increase size
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+        });
+
+        block_cache_sync_all();
+    }
+    /// inode's file stat
+    pub fn is_file(&self) -> bool {
+        let _fs = self.fs.lock();
+        return self.read_disk_inode(|disk_inode| {
+            return disk_inode.is_file();
+        });
+    }
+    /// inode's file stat
+    pub fn link_num(&self) -> u32 {
+        let _fs = self.fs.lock();
+        return self.read_disk_inode(|disk_inode| {
+            return disk_inode.nlink;
+        });
+    }
+    /// inode's file stat
+    pub fn inode_id(&self) -> u32 {
+        let _fs = self.fs.lock();
+        return self.read_disk_inode(|disk_inode| {
+            return disk_inode.inode_id;
+        });
+    }
     /// Find inode under a disk inode by name
     fn find_inode_id(&self, name: &str, disk_inode: &DiskInode) -> Option<u32> {
         // assert it is a directory
@@ -111,6 +222,7 @@ impl Inode {
             .lock()
             .modify(new_inode_block_offset, |new_inode: &mut DiskInode| {
                 new_inode.initialize(DiskInodeType::File);
+                new_inode.inode_id = new_inode_id;
             });
         self.modify_disk_inode(|root_inode| {
             // append file in the dirent

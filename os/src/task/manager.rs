@@ -23,7 +23,31 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        // self.ready_queue.pop_front()
+        if let Some(min_task) = self.ready_queue.front() {
+            let mut min_stride = min_task.get_stride();
+            let mut min_idx = 0;
+            for (i, task) in self.ready_queue.iter().enumerate() {
+                if task.get_stride() < min_stride {
+                    min_stride = task.get_stride();
+                    min_idx = i;
+                }
+            }
+            return self.ready_queue.remove(min_idx);
+        }
+        // if this schedueling algorithm pass test, test gose wrong
+        // if let Some(max_task) = self.ready_queue.front() {
+        //     let mut max_stride = max_task.get_stride();
+        //     let mut max_idx = 0;
+        //     for (i, task) in self.ready_queue.iter().enumerate() {
+        //         if task.get_stride() > max_stride {
+        //             max_stride = task.get_stride();
+        //             max_idx = i;
+        //         }
+        //     }
+        //     return self.ready_queue.remove(max_idx);
+        // }
+        return None;
     }
 }
 

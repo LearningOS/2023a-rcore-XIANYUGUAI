@@ -1,5 +1,5 @@
 //! File and filesystem-related syscalls
-use crate::fs::{open_file, OpenFlags, Stat};
+use crate::fs::{open_file, OpenFlags, Stat, link, unlink};
 use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
 use crate::task::{current_task, current_user_token};
 
@@ -48,15 +48,18 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 
 pub fn sys_open(path: *const u8, flags: u32) -> isize {
     trace!("kernel:pid[{}] sys_open", current_task().unwrap().pid.0);
+    debug!("open");
     let task = current_task().unwrap();
     let token = current_user_token();
     let path = translated_str(token, path);
     if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+        debug!("open: {}", path.as_str());
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
         fd as isize
     } else {
+        debug!("open fail: {}", path.as_str());
         -1
     }
 }
@@ -81,7 +84,24 @@ pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
         "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    debug!("fstat");
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if _fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[_fd] {
+        debug!("fstat: fd");
+        let file = file.clone();
+        let stat = file.fstat();
+        let data = &stat as *const Stat as usize;
+        debug!("fstat: stat");
+        inner.memory_set.copyout(_st as usize, data, core::mem::size_of::<Stat>()); 
+        debug!("fstat: ret");
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement linkat.
@@ -90,6 +110,16 @@ pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
         "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
+    debug!("link");
+    let current_token = current_user_token();
+    let old_name = translated_str(current_token, _old_name);
+    let new_name = translated_str(current_token, _new_name);
+    if old_name == new_name {
+        return -1;
+    }
+    if link(old_name.as_str(), new_name.as_str()) {
+        return 0;
+    }
     -1
 }
 
@@ -99,5 +129,10 @@ pub fn sys_unlinkat(_name: *const u8) -> isize {
         "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
+    let current_token = current_user_token();
+    let name = translated_str(current_token, _name);
+    if unlink(name.as_str()) {
+        return 0;
+    }
     -1
 }

@@ -44,6 +44,13 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
+
+    fn update_current_syscall_info(&self, syscall_id: &usize) {
+        if let Some(current) = self.current() {
+            current.update_syscall_info(syscall_id);
+        }
+    }
+
 }
 
 lazy_static! {
@@ -56,6 +63,7 @@ pub fn run_tasks() {
     loop {
         let mut processor = PROCESSOR.exclusive_access();
         if let Some(task) = fetch_task() {
+            task.stride_pass();
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -108,4 +116,15 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+/// Update Syscall Time Info
+pub fn update_syscall_info(syscall_id: &usize) {
+    PROCESSOR.exclusive_access().update_current_syscall_info(syscall_id);
+}
+
+/// Get current Task's Control Block
+pub fn get_task_control_block() -> Arc<TaskControlBlock> {
+    let current = current_task().unwrap();
+    return current;
 }
