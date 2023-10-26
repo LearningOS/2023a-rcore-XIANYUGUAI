@@ -1,13 +1,14 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::config::{TRAP_CONTEXT_BASE, MAX_SYSCALL_NUM, PAGE_SIZE};
+use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::timer::get_time_ms;
 
 /// Task control block structure
 ///
@@ -33,6 +34,66 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+    /// Update syscall info for taskinfo syscall
+    pub fn update_syscall_info(&self, syscall_id: &usize) {
+        let mut inner = self.inner.exclusive_access();
+        inner.syscall_times[*syscall_id] += 1;
+    }
+    /// Copyout data from srcpa to dstva corresponding to current process's pagetable
+    pub fn copyout(&self, dstva: usize, srcpa: usize, length: usize) {
+        let inner = self.inner.exclusive_access();
+        inner.memory_set.copyout(dstva, srcpa, length);
+    }
+    /// Get Task Status in current TaskControlBlock
+    pub fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        return inner.task_status;
+    }
+    /// Get Task Syscall Times in current TaskControlBlock
+    pub fn get_task_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM]{
+        let inner = self.inner.exclusive_access();
+        return inner.syscall_times;
+    }
+    /// Get Task Start Time in current TaskControlBlock
+    pub fn get_task_start_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        return inner.time;
+    }
+    /// Get TaskInfo in current TaskControlBlock
+    // pub fn get_task_info(&self) -> TaskInfo {
+    //     let inner = self.inner.exclusive_access();
+    //     let task_info = TaskInfo {
+    //         status: inner.task_status,
+    //         syscall_times:  inner.syscall_times,
+    //         time:   inner.time,
+    //     };
+    //     return task_info;
+    // }
+    /// Check if range is intersect with existing mapped range in memory set 
+    pub fn range_intersect(&self, start: usize, len: usize) -> bool {
+        let inner = self.inner.exclusive_access();
+        return inner.memory_set.range_intersect(start, len);
+    }
+    /// insert range from Start to End with Permission to memory_area
+    pub fn insert_framed_area(&self, start_va: VirtAddr, end_va: VirtAddr, perm: MapPermission) {
+        let mut inner = self.inner.exclusive_access();
+        inner.memory_set.insert_framed_area(start_va, end_va, perm);
+    }
+    /// unmap_range from start with a length
+    pub fn unmap_range(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        return inner.memory_set.unmap_range(start, len);
+    }
+    /// Set process priority
+    pub fn set_priority(&self, prio: isize) {
+        let mut inner = self.inner.exclusive_access();
+        inner.priority = prio as usize;
+    }
+    /// Get process Stride
+    pub fn get_stride(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        return inner.stride;
     }
 }
 
@@ -68,6 +129,17 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// syscall excuted times
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// time when task initialized 
+    pub time: usize,
+
+    /// task priority
+    pub priority: usize,
+
+    pub stride: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +190,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    time: get_time_ms(),
+                    priority: 2,
+                    stride: 0,
                 })
             },
         };
@@ -191,6 +267,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    time: get_time_ms(),
+                    priority: 2,
+                    stride: 0,
                 })
             },
         });
@@ -204,6 +284,27 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// set parent of process for spawn
+    pub fn set_parent_process(&self, p: Arc<TaskControlBlock>) {
+        let mut inner = self.inner_exclusive_access();
+        inner.parent = Some(Arc::downgrade(&p));
+    }
+
+    /// push child of process for spawn
+    pub fn push_child_process(&self, child: Arc<TaskControlBlock>) {
+        let mut inner = self.inner_exclusive_access();
+        inner.children.push(child.clone());
+    }
+
+    /// After process got some time slice, increase it's stride
+    pub fn stride_pass(&self) {
+        let mut inner = self.inner_exclusive_access();
+        // Set BigStride equal to PGSIZE - 1
+        inner.stride += (PAGE_SIZE-1)/inner.priority;
+        // this should fail, if passed test gose wrong
+        // inner.stride += inner.priority;
     }
 
     /// get pid of process

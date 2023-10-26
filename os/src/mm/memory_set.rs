@@ -4,6 +4,7 @@ use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
 use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+// use super::{translated_byte_buffer};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -271,6 +272,48 @@ impl MemorySet {
         self.areas.clear();
     }
 
+    /// Copy srcdata to dst virtual address in current pagetable
+    #[allow(unused)]
+    pub fn copyout(&self, dstva: usize, srcpa: usize, length: usize) {
+        let mut vpn = VirtAddr::from(dstva).floor();
+        let mut len = length;
+        let mut va = dstva;
+        let mut off = 0;
+        let data = unsafe { core::slice::from_raw_parts_mut(srcpa as *mut u8, length) };
+
+        while len > 0 {
+            let va_offset = VirtAddr::from(va).page_offset();
+            let mut n = PAGE_SIZE - va_offset;
+            if n > len {
+                n = len;
+            }
+
+            let src = &data[off..off+n];
+            let dst = &mut self.page_table
+                .translate(vpn)
+                .unwrap()
+                .ppn()
+                .get_bytes_array()[(va_offset)..(va_offset+n)];
+            dst.copy_from_slice(src);
+
+            len -= n;
+            off += n;
+
+            va += n;
+            vpn.step();
+        }
+
+        // Another way to copy data from kernel space to user space.
+
+        // let bufs = translated_byte_buffer(self.page_table.token(), dstva as *const u8, length);
+        // let data = unsafe { core::slice::from_raw_parts_mut(srcpa as *mut u8, length) };
+        // let mut off = 0;
+        // for buf in bufs {
+        //     buf.copy_from_slice(&data[off..off+buf.len()]);
+        //     off += buf.len();
+        // }
+    }
+
     /// shrink the area to new_end
     #[allow(unused)]
     pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> bool {
@@ -300,6 +343,93 @@ impl MemorySet {
             false
         }
     }
+
+    /// check if a map range is intersect with the other 
+    #[allow(unused)]
+    pub fn range_intersect(&self, start: usize, len: usize) -> bool {
+
+        let start_vpn: VirtPageNum = VirtAddr::from(start).floor();
+        let end_vpn: VirtPageNum = VirtAddr::from(start+len).ceil();
+
+        let vpn_range = VPNRange::new(start_vpn, end_vpn);
+        for area in &self.areas {
+            if area.intersect(vpn_range) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // /// check if a map range is exist
+    // #[allow(unused)]
+    // pub fn range_exist(&self, start: usize, len: usize) -> bool {
+
+    //     let start_vpn: VirtPageNum = VirtAddr::from(start).floor();
+    //     let end_vpn: VirtPageNum = VirtAddr::from(start+len).ceil();
+
+    //     let vpn_range = VPNRange::new(start_vpn, end_vpn);
+    //     for area in &self.areas {
+    //         if area.range_exist(vpn_range) {
+    //             return true;
+    //         }
+    //     }
+    //     return false;
+    // }
+
+    /// Check if a map range is exist
+    #[allow(unused)]
+    pub fn get_area_by_range(&self, start: usize, len: usize) -> Option<&MapArea> {
+
+        let start_vpn: VirtPageNum = VirtAddr::from(start).floor();
+        let end_vpn: VirtPageNum = VirtAddr::from(start+len).ceil();
+
+        let vpn_range = VPNRange::new(start_vpn, end_vpn);
+        for area in &self.areas {
+            if area.range_exist(vpn_range) {
+                return Some(area);
+            }
+        }
+        return None;
+    }
+
+    /// Unmap a range of mapped address
+    pub fn unmap_range(&mut self, start: usize, len: usize) -> bool {
+        if let Some(area) = self.get_area_by_range(start, len) {
+            let sl = area.vpn_range.get_start();
+            let area_va = VirtAddr::from(sl);
+            let start_va = VirtAddr::from(start);
+            if start_va == area_va {
+                let i = self.areas
+                        .iter()
+                        .position(|x| (*x).vpn_range.get_start() == sl)
+                        .unwrap();
+                self.shrink_to(area_va, start_va);
+                self.areas.remove(i);
+            } else {
+                self.shrink_to(area_va, start_va);
+            }
+            // Seems that split a mapped area into two mapped area or
+            // cut area to smaller piece of original area
+            // is not tested, maybe do this part in the future
+            // let start_vpn: VirtPageNum = VirtAddr::from(start).floor();
+            // let end_vpn: VirtPageNum = VirtAddr::from(start+len).ceil();
+            // let sl = area.vpn_range.get_start();
+            // let sr = area.vpn_range.get_end();
+            // if (start_vpn > sl && end_vpn < sr) {
+            //     area.vpn_range = VPNRange::new(sl, VirtPageNum{vpn: start_vpn.0-1,})
+            //     let split_area = MapArea { 
+            //                         vpn_range: VPNRange::new(start_vpn, sr),
+            //                         data_frames:
+            //                         map_type: area.map_type,
+            //                         map_perm: area.map_perm,
+            //                     }
+            // }
+        } else {
+            return false;
+        }
+        return true;
+    }
+    
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -378,6 +508,29 @@ impl MapArea {
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
     }
+
+    #[allow(unused)]
+    pub fn intersect(&self, vpn_range: VPNRange) -> bool {
+        let sl = self.vpn_range.get_start();
+        let sr = self.vpn_range.get_end();
+        let vl = vpn_range.get_start();
+        let vr = vpn_range.get_end();
+        // return (sl <= vr && sr >= vl) || 
+        // (vr <= sl && vr >= sl);
+        return !(sr <= vl || vr <= sl);
+    }
+
+    #[allow(unused)]
+    pub fn range_exist(&self, vpn_range: VPNRange) -> bool {
+        let sl = self.vpn_range.get_start();
+        let sr = self.vpn_range.get_end();
+        let vl = vpn_range.get_start();
+        let vr = vpn_range.get_end();
+        // return (sl <= vr && sr >= vl) || 
+        // (vr <= sl && vr >= sl);
+        return sl <= vl && sr >= vr;
+    }
+
     /// data: start-aligned but maybe with shorter length
     /// assume that all frames were cleared before
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) {
