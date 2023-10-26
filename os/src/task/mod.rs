@@ -153,6 +153,18 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn update_syscall_info(&self, syscall_id: &usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].syscall_times[*syscall_id] += 1;
+    }
+
+    fn get_current_task_control_block(&self) -> *mut TaskControlBlock {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        return &mut inner.tasks[cur];
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +213,14 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Update Syscall Time Info
+pub fn update_syscall_info(syscall_id: &usize) {
+    TASK_MANAGER.update_syscall_info(syscall_id);
+}
+
+/// Get current Task's Control Block
+pub fn get_task_control_block() -> *mut TaskControlBlock {
+    TASK_MANAGER.get_current_task_control_block()
 }
